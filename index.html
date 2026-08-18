@@ -180,6 +180,18 @@
     font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.1em;
     text-transform:uppercase;padding:0 14px;cursor:pointer;
   }
+  .lookup .geo{
+    flex:none;display:flex;align-items:center;gap:7px;
+    background:var(--panel-2);border:1px solid var(--line);color:var(--wet);
+    border-radius:2px;padding:0 13px;cursor:pointer;text-transform:none;
+    font-family:"IBM Plex Mono",monospace;font-size:12px;letter-spacing:.06em;
+  }
+  .lookup .geo:hover{border-color:var(--wet)}
+  .lookup .geo:focus-visible{outline:2px solid var(--wet);outline-offset:2px}
+  .lookup .geo[disabled]{opacity:.45;cursor:default}
+  .lookup .geo svg{display:block;flex:none}
+  @media (max-width:380px){ .lookup .geo span{display:none} .lookup .geo{padding:0 11px} }
+
   .linkish{
     background:none;border:0;padding:0;color:var(--wet);cursor:pointer;
     font-family:"IBM Plex Mono",monospace;font-size:12px;text-decoration:underline;
@@ -350,6 +362,13 @@
              role="combobox" aria-expanded="false" aria-controls="suggest" aria-autocomplete="list"
              placeholder="Town, trail, landmark, or 51.51, -0.13"
              aria-label="Town, trail, landmark or coordinates">
+      <button class="geo" id="geo" type="button" hidden aria-label="Use my current location">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="1.8" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7.6"/>
+          <path d="M12 1.4v3.2M12 19.4v3.2M1.4 12h3.2M19.4 12h3.2" stroke-linecap="round"/>
+        </svg><span>Here</span>
+      </button>
     </div>
     <ul class="suggest" id="suggest" role="listbox" hidden></ul>
 
@@ -396,9 +415,10 @@
     <div class="field">
       <div class="field-top">
         <label for="mins">How long will you be out</label>
-        <span class="val"><span id="minsVal">10</span> <small>minutes</small></span>
+        <span class="val" id="minsVal">10 <small>minutes</small></span>
       </div>
-      <input type="range" id="mins" min="1" max="120" value="10" step="1">
+      <input type="range" id="mins" min="0" max="100" value="9" step="1">
+      <p class="hint" id="minsHint"></p>
     </div>
 
     <div class="field">
@@ -505,6 +525,23 @@
   function posToMm(p){
     var mm = Math.pow(p/100, 2.2) * 60;
     return mm < 10 ? Math.round(mm*10)/10 : Math.round(mm);
+  }
+
+  /* Slider position -> minutes out, from a dash to the postbox up to a twelve
+     hour day on the hill. Curved for the same reason the rainfall slider is:
+     the difference between 5 and 15 minutes matters, the difference between
+     9 and 9¼ hours does not. Steps coarsen as the numbers grow. */
+  function posToMins(p){
+    var m = 1 + Math.pow(p/100, 1.8) * 719;
+    if(m < 20)  return Math.round(m);
+    if(m < 120) return Math.round(m/5)*5;
+    return Math.round(m/15)*15;
+  }
+  function two(n){ return (n<10?'0':'')+n; }
+  function spell(m){
+    if(m < 90) return m+' <small>minutes</small>';
+    var h = Math.floor(m/60), r = m%60;
+    return h+'<small>h</small>'+(r ? ' '+two(r) : '');
   }
 
   function rainWord(rate){ // mm per hour
@@ -630,16 +667,23 @@
   function render(){
     var mm = posToMm(+mmEl.value);
     var hrs = +hrsEl.value / 2;              // slider is half-hour steps
-    var mins = +minsEl.value;
+    var mins = posToMins(+minsEl.value);
     var rate = mm / hrs;                     // mm per hour
 
-    var v = compute(rate, mins*60, pace, cover);
+    /* Standing out in it longer than it rains doesn't get you any wetter: the
+       shower ends whether or not you go in. Only the overlap counts. */
+    var wet = Math.min(mins, hrs*60);
+    var v = compute(rate, wet*60, pace, cover);
     paint(v.top, v.front);
 
     document.getElementById('mmVal').textContent = mm;
     document.getElementById('mmHint').textContent = rainWord(rate);
     document.getElementById('hrsVal').textContent = hrs % 1 ? hrs.toFixed(1) : hrs;
-    document.getElementById('minsVal').textContent = mins;
+    document.getElementById('minsVal').innerHTML = spell(mins);
+    document.getElementById('minsHint').textContent = wet < mins
+      ? 'The rain runs out first \u2014 only '+spell(wet).replace(/<[^>]+>/g,'')+
+        ' of that is spent getting wet.'
+      : '';
 
     setRainDensity(rate);
   }

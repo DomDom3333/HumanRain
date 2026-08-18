@@ -26,8 +26,8 @@
   var ASCENT_MPH = 600;  // plus an hour per 600 m of ascent
   var DAYS = 7;          // how far ahead Open-Meteo is asked to look
   var el = {};
-  ['q','suggest','gpx','status','retry','out','outHead','outSub','placeView','days','hours','hticks',
-   'legs','routeOpts','startAt','fitness'].forEach(function(k){ el[k] = document.getElementById(k); });
+  ['q','suggest','gpx','geo','status','retry','out','outHead','outSub','placeView','days','hours',
+   'hticks','legs','routeOpts','startAt','fitness'].forEach(function(k){ el[k] = document.getElementById(k); });
 
   var again = null;
   function say(m, working){
@@ -339,6 +339,42 @@
     });
   }
 
+  /* ================= where you are ================= */
+
+  /* "Am I about to get wet" is a question asked outdoors, so the phone already
+     knows the answer to "where". The button appears wherever the API does rather
+     than on a guess about the device; it needs https, which is where this lives. */
+  function locate(){
+    el.geo.disabled = true;
+    say('Finding where you are\u2026', 1);
+    navigator.geolocation.getCurrentPosition(function(pos){
+      el.geo.disabled = false;
+      var la = pos.coords.latitude, lo = pos.coords.longitude;
+      var coords = la.toFixed(3)+', '+lo.toFixed(3);
+      // A place name reads better than coordinates, but never at the cost of the
+      // forecast — if the reverse lookup fails the numbers do fine.
+      json('https://photon.komoot.io/reverse?limit=1&lang=en&lat='+la.toFixed(5)+'&lon='+lo.toFixed(5))
+        .then(function(d){
+          var pr = ((d.features||[])[0]||{}).properties || {};
+          return pr.city || pr.name || coords;
+        }, function(){ return coords; })
+        .then(function(label){
+          el.q.value = label;
+          closeList(); dropTrailSearch();
+          loadPlace(la, lo, label);
+        });
+    }, function(err){
+      el.geo.disabled = false;
+      // A refusal is a decision, not a glitch: don't offer to ask again.
+      if(err && err.code === 1) say('Location permission was refused \u2014 search for the place instead.');
+      else fail('Couldn\u2019t get a fix on where you are \u2014 search for the place instead.', locate);
+    }, {enableHighAccuracy:false, timeout:15000, maximumAge:300000});
+  }
+  if(navigator.geolocation){
+    el.geo.hidden = false;
+    el.geo.addEventListener('click', locate);
+  }
+
   /* ================= place mode ================= */
 
   var fc = null;
@@ -393,11 +429,12 @@
       window.WetMetre.setRain(0, 1);         // nothing falling, and the sky above clears with it
     }else{
       var total=0; for(var k=start;k<=end;k++) total+=p[k];
-      var hrs=end-start+1, when=dayOf(t[start],off);
+      var hrs=end-start+1, when=dayOf(t[start],off), name=dayName(when,fc.today);
       fc.day=index[when];                    // open on the day the rain is actually on
+      // "tomorrow" is a word mid-sentence; "Fri 21" keeps its capital.
+      var lead = when===fc.today ? '' : (name==='Tomorrow' ? 'tomorrow ' : name+' ');
       el.outHead.textContent=(start===i0 ? 'Raining now'
-          : 'Rain '+(when===fc.today ? '' : dayName(when,fc.today).toLowerCase()+' ')+
-            'from '+hhmm(t[start],off))+
+          : 'Rain '+lead+'from '+hhmm(t[start],off))+
         ' \u2014 '+total.toFixed(1)+' mm over '+hrs+' hour'+(hrs>1?'s':'')+'.';
       el.outSub.textContent=label+' \u00b7 wind '+Math.round(w[start])+' km/h \u00b7 applied to the numbers above.';
       window.WetMetre.setRain(total, hrs);

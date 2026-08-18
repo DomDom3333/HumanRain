@@ -13,7 +13,12 @@ time, so tomorrow's walk can be planned today.
 
 The search box takes anything OpenStreetMap has a name for — a town, a
 waymarked trail, a gorge, a ridge, a peak. Whatever is a line on the map is
-walked as a route; everything else gets the forecast where it stands.
+walked as a route; everything else gets the forecast where it stands. The
+crosshair beside it takes where you are standing now, which is usually the
+question on a phone.
+
+Time outside runs from a minute to a twelve hour day. Staying out past the
+end of the shower doesn't count against you — only the overlap does.
 
 Three files, no build step, no dependencies, no API key.
 
