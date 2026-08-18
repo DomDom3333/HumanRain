@@ -324,11 +324,11 @@
       Load a GPX file
       <input type="file" id="gpx" accept=".gpx,application/gpx+xml">
     </label>
-    <p class="hint">From bergfex, Komoot, Outdooractive, AllTrails or a watch — any tour page with a GPX download.</p>
+    <p class="hint">eg. from Bergfex, Komoot, Outdooractive, AllTrails or a watch — any tour page with a GPX download.</p>
 
     <div id="routeOpts" hidden>
       <div class="field" style="margin-top:18px">
-        <div class="field-top"><label for="startAt">Setting off</label></div>
+        <div class="field-top"><label for="startAt">Starting time</label></div>
         <input class="dt" type="datetime-local" id="startAt">
       </div>
       <div class="field">
@@ -359,7 +359,7 @@
 
     <div class="field">
       <div class="field-top">
-        <label for="mins">You're out in it</label>
+        <label for="mins">How long will you be out</label>
         <span class="val"><span id="minsVal">10</span> <small>minutes</small></span>
       </div>
       <input type="range" id="mins" min="1" max="120" value="10" step="1">
