@@ -10,6 +10,10 @@ Search a town for the next rain window, or load a walking route (GPX from
 bergfex, Komoot, AllTrails, or a trail by name) to get the weather you'll
 actually walk into, hour by hour.
 
+The search box takes anything OpenStreetMap has a name for — a town, a
+waymarked trail, a gorge, a ridge, a peak. Whatever is a line on the map is
+walked as a route; everything else gets the forecast where it stands.
+
 Three files, no build step, no dependencies, no API key.
 
 ## How it works
@@ -33,9 +37,12 @@ bucket (10 L), bathtub (150 L).
 
 ## Data
 
-Weather and elevation: [Open-Meteo](https://open-meteo.com) (CC BY 4.0).
-Trails: [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors
-via the [Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API), ODbL.
+Weather, elevation and town search: [Open-Meteo](https://open-meteo.com)
+(CC BY 4.0). Places, landmarks and trails: [OpenStreetMap][osm] contributors,
+ODbL — searched through [Photon](https://photon.komoot.io) and the
+[Overpass API](https://wiki.openstreetmap.org/wiki/Overpass_API).
+
+[osm]: https://www.openstreetmap.org/copyright
 
 ## Licence
 

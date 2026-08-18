@@ -55,6 +55,22 @@
     return {kind:'place', label:la.toFixed(3)+', '+lo.toFixed(3), sub:'coordinates', lat:la, lon:lo};
   }
 
+  /* Anything named in OpenStreetMap that you can walk *along* — a gorge, a
+     ridge, a marked path — is a route, not a dot. Everything else is a place. */
+  var LINEAR = {
+    route:   {hiking:'hiking route', foot:'walking route', walking:'walking route',
+              running:'running route', bicycle:'cycle route'},
+    natural: {gorge:'gorge', valley:'valley', ridge:'ridge', arete:'arête'},
+    highway: {path:'path', footway:'footway', track:'track', bridleway:'bridleway',
+              steps:'steps', cycleway:'cycleway'}
+  };
+  function linear(key, value, osmType){
+    if(osmType !== 'W' && osmType !== 'R') return null;      // a node is never a line
+    return (LINEAR[key] || {})[value] || null;
+  }
+
+  function key(it){ return it.label.toLowerCase()+'@'+it.lat.toFixed(2)+','+it.lon.toFixed(2); }
+
   function drawList(){
     if(!items.length){ el.suggest.hidden=true; el.q.setAttribute('aria-expanded','false'); return; }
     el.suggest.innerHTML = items.map(function(it,i){
@@ -80,41 +96,119 @@
     timer = setTimeout(function(){ suggest(v); }, 220);
   });
 
+  /* Three sources, each answering when it can: the gazetteer knows towns, Photon
+     knows every named feature in OpenStreetMap, Overpass knows waymarked trails
+     by name. Results are merged as they land rather than awaited together. */
+  var bucket = {towns:[], osm:[], trails:[]};
+
+  /* Each source keeps a few slots of its own, so a waymarked trail still shows
+     even when a dozen streets share its name. */
+  var SLOTS = {towns:3, osm:4, trails:3};
+
+  function merge(){
+    var seen = {}, out = [];
+    ['towns','osm','trails'].forEach(function(b){
+      var n = 0;
+      bucket[b].forEach(function(it){
+        var k = key(it);
+        if(seen[k] || n >= SLOTS[b]) return;
+        seen[k] = 1; n++; out.push(it);
+      });
+    });
+    items = out; cursor = -1; drawList();
+  }
+
+  function place(h){
+    return {kind:'place', label:h.name, lat:h.latitude, lon:h.longitude,
+            sub:[h.admin1, h.country].filter(Boolean).join(', ')};
+  }
+
+  /* Photon hands back the OSM object behind each hit, so a gorge or a ridge can
+     be walked as a route instead of collapsing to a single dot on the map. */
+  function fromPhoton(f){
+    var p = f.properties || {}, c = (f.geometry||{}).coordinates;
+    if(!p.name || !c) return null;
+    var where = [p.city || p.district || p.county, p.state, p.country].filter(Boolean).join(', ');
+    var line = linear(p.osm_key, p.osm_value, p.osm_type);
+    var it = {kind: line ? 'route' : 'place', label:p.name, lat:c[1], lon:c[0],
+              sub:[line, where].filter(Boolean).join(' \u00b7 ')};
+    if(line) it.osm = {type:p.osm_type, id:p.osm_id};
+    return it;
+  }
+
+  function rx(s){ return s.replace(/["\\]/g,'').replace(/[\^$.*+?()[\]{}|]/g, '\\$&'); }
+
+  var PHOTON_LANG = (function(){
+    var l = (navigator.language||'en').slice(0,2).toLowerCase();
+    return ['de','fr','it','en'].indexOf(l) > -1 ? l : 'en';
+  })();
+
   function suggest(v){
     var my = ++seq;
-    fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='+encodeURIComponent(v))
+    bucket = {towns:[], osm:[], trails:[]};
+    var failed = 0;
+    function down(){ if(my===seq && ++failed >= 2) say('Couldn\u2019t reach the search service.'); }
+
+    var towns = fetch('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='+encodeURIComponent(v))
       .then(function(r){ return r.json(); })
       .then(function(d){
         if(my !== seq) return;
-        items = (d.results||[]).map(function(h){
-          return {kind:'place', label:h.name, lat:h.latitude, lon:h.longitude,
-                  sub:[h.admin1, h.country].filter(Boolean).join(', ')};
-        });
-        cursor = -1; drawList();
+        bucket.towns = (d.results||[]).map(place);
+        merge();
       })
-      .catch(function(){ if(my===seq){ say('Couldn\u2019t reach the search service.'); } });
+      .catch(function(){ if(my===seq) down(); });
 
-    // Trails come from Overpass, which is slow and rate-limits hard, so it gets a
-    // longer leash and only fires on queries long enough to be a real name.
+    var osm = fetch('https://photon.komoot.io/api?limit=8&lang='+PHOTON_LANG+'&q='+encodeURIComponent(v))
+      .then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .then(function(d){
+        if(my !== seq) return;
+        bucket.osm = (d.features||[]).map(fromPhoton).filter(Boolean);
+        merge();
+      })
+      .catch(function(){ if(my===seq) down(); });
+
+    // Trails come from Overpass, which is slow and rate-limits hard, so it only
+    // fires on queries long enough to be a real name — and only once the
+    // geocoders have come back, since their answer is what bounds the search.
     if(v.length >= 4){
       clearTimeout(suggest.t);
-      suggest.t = setTimeout(function(){
-        var mine = seq;
-        overpass('[out:json][timeout:20];relation["route"~"hiking|foot"]["name"~"'+
-                 v.replace(/["\\]/g,'')+'",i];out tags 6;')
-          .then(function(d){
-            if(mine !== seq) return;
-            var add = (d.elements||[]).filter(function(e){ return e.tags && e.tags.name; })
-              .map(function(h){
-                return {kind:'route', label:h.tags.name, id:h.id,
-                        sub:[h.tags.distance ? h.tags.distance+' km' : null,
-                             h.tags.symbol || h.tags.network || 'hiking route'].filter(Boolean).join(' \u00b7 ')};
-              });
-            if(add.length){ items = items.concat(add); drawList(); }
-          })
-          .catch(function(){});
-      }, 650);
+      Promise.all([towns, osm]).then(function(){
+        clearTimeout(suggest.t);
+        suggest.t = setTimeout(function(){
+          if(my !== seq) return;
+          var anchor = bucket.osm[0] || bucket.towns[0];
+          trails(v, my, anchor).then(function(n){
+            if(!n && anchor) trails(v, my, null);   // nothing nearby \u2014 try the whole world
+          });
+        }, 250);
+      });
     }
+  }
+
+  /* A name search across every route relation on earth takes Overpass longer than
+     it is willing to spend, so it is fenced to a box around whatever the
+     geocoders just found. That box is where the walk almost always is. */
+  function trails(v, my, anchor){
+    var pad = 0.7, box = anchor
+      ? '('+(anchor.lat-pad).toFixed(3)+','+(anchor.lon-pad).toFixed(3)+','+
+            (anchor.lat+pad).toFixed(3)+','+(anchor.lon+pad).toFixed(3)+')'
+      : '';
+    return overpass('[out:json][timeout:'+(box?25:45)+'];relation["route"~"hiking|foot|walking"]'+
+                    '["name"~"'+rx(v)+'",i]'+box+';out center tags 6;')
+      .then(function(d){
+        var found = (d.elements||[]).filter(function(e){ return e.tags && e.tags.name; });
+        if(my !== seq) return found.length;
+        bucket.trails = found.map(function(h){
+          var c = h.center || {};
+          return {kind:'route', label:h.tags.name, osm:{type:'R', id:h.id},
+                  lat:c.lat || 0, lon:c.lon || 0,
+                  sub:[h.tags.distance ? h.tags.distance+' km' : null,
+                       h.tags.symbol || h.tags.network || 'hiking route'].filter(Boolean).join(' \u00b7 ')};
+        });
+        merge();
+        return found.length;
+      })
+      .catch(function(){ return 0; });
   }
 
   el.q.addEventListener('keydown', function(e){
@@ -136,23 +230,36 @@
     if(!it) return;
     el.q.value = it.label;
     closeList();
-    if(it.kind === 'place') loadPlace(it.lat, it.lon, it.label);
-    else loadRoute(it.id, it.label);
+    if(it.osm) loadOsm(it);
+    else loadPlace(it.lat, it.lon, it.label);
   }
 
-  function overpass(query){
-    return fetch('https://overpass-api.de/api/interpreter', {
+  /* Overpass mirrors go down and rate-limit independently, so try them in turn. */
+  var MIRRORS = ['https://overpass-api.de/api/interpreter',
+                 'https://overpass.private.coffee/api/interpreter',
+                 'https://overpass.kumi.systems/api/interpreter'];
+
+  function overpass(query, n){
+    n = n || 0;
+    return fetch(MIRRORS[n], {
       method:'POST', body:'data='+encodeURIComponent(query),
       headers:{'Content-Type':'application/x-www-form-urlencoded'}
-    }).then(function(r){ if(!r.ok) throw 0; return r.json(); });
+    }).then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .catch(function(e){
+        if(n+1 < MIRRORS.length) return overpass(query, n+1);
+        throw e;
+      });
   }
 
   /* ================= place mode ================= */
 
   var fc = null;
 
-  function loadPlace(lat, lon, label){
+  var note = '';
+
+  function loadPlace(lat, lon, label, why){
     el.routeOpts.hidden = true;
+    note = why || '';
     say('Fetching the forecast for '+label+'\u2026');
     fetch('https://api.open-meteo.com/v1/forecast?timeformat=unixtime&timezone=auto&forecast_days=3'+
           '&hourly=precipitation,wind_speed_10m&latitude='+lat.toFixed(4)+'&longitude='+lon.toFixed(4))
@@ -167,7 +274,7 @@
     while(i0<t.length-1 && t[i0+1]<=now) i0++;
     fc = {t:t,p:p,w:w,off:d.utc_offset_seconds||0,i0:i0,label:label};
 
-    say(''); el.out.hidden=false; el.placeView.hidden=false; el.legs.hidden=true;
+    say(note); el.out.hidden=false; el.placeView.hidden=false; el.legs.hidden=true;
 
     var start=-1,end=-1;
     for(var i=i0;i<Math.min(t.length,i0+48);i++){ if(p[i]>=0.1){ start=i; break; } }
@@ -246,24 +353,55 @@
     return chain;
   }
 
-  function loadRoute(id, name){
+  function geom(g){ return g.map(function(p){ return {lat:p.lat, lon:p.lon, ele:null}; }); }
+
+  /* Pull the line behind an OSM way or relation. If it turns out to be an area,
+     a stub, or nothing at all, fall back to the forecast at its location \u2014 a dot
+     on the map still beats "not found". */
+  function loadOsm(it){
+    var name = it.label, type = it.osm.type, id = it.osm.id;
+    var here = (it.lat || it.lon)
+      ? function(why){ loadPlace(it.lat, it.lon, name, why); }
+      : function(why){ say(why || 'That route has no geometry in OpenStreetMap.'); };
+
+    if(type === 'N'){ here(''); return; }
+
     say('Loading \u201c'+name+'\u201d from OpenStreetMap\u2026');
-    overpass('[out:json][timeout:60];relation('+id+');out geom;')
+    overpass('[out:json][timeout:60];'+(type==='R'?'relation':'way')+'('+id+');out geom;')
       .then(function(d){
-        var rel=(d.elements||[])[0];
-        if(!rel||!rel.members){ say('That route has no geometry in OpenStreetMap.'); return; }
-        var ways=rel.members.filter(function(m){ return m.type==='way' && m.geometry && m.geometry.length>1; })
-                            .map(function(m){ return m.geometry.map(function(g){ return {lat:g.lat, lon:g.lon, ele:null}; }); });
-        if(!ways.length){ say('That route has no usable path geometry.'); return; }
-        var line=stitch(ways);
-        if(line.length<2){ say('Couldn\u2019t assemble that route into one path \u2014 it may be split into disconnected sections.'); return; }
+        var e=(d.elements||[])[0], line;
+        if(!e){ here('Nothing in OpenStreetMap for that. Showing the forecast at its location.'); return; }
+
+        if(e.type === 'relation'){
+          var ways=(e.members||[]).filter(function(m){ return m.type==='way' && m.geometry && m.geometry.length>1; })
+                                  .map(function(m){ return geom(m.geometry); });
+          line = ways.length ? stitch(ways) : [];
+        }else{
+          line = e.geometry ? geom(e.geometry) : [];
+          // a closed way is an outline, not a walk
+          var a=line[0], b=line[line.length-1];
+          if(line.length>2 && a.lat===b.lat && a.lon===b.lon) line=[];
+        }
+
+        var len = 0;
+        for(var i=1;i<line.length;i++) len += dist(line[i-1], line[i]);
+        if(line.length<2 || len<250){
+          here('That one is a point on the map rather than a walk \u2014 here\u2019s the forecast for it.');
+          return;
+        }
         runRoute(name, line);
       })
-      .catch(function(){ say('Overpass didn\u2019t answer \u2014 it rate-limits hard. Wait a minute, or load the GPX instead.'); });
+      .catch(function(){
+        here('Overpass didn\u2019t answer \u2014 it rate-limits hard. Showing the forecast at that spot; '+
+             'for the walk itself, wait a minute or load the GPX.');
+      });
   }
 
-  /* thin a route down to ~120 evenly spaced nodes: enough for distance,
-     ascent and a midpoint, and coarse enough to shrug off GPS jitter */
+  /* thin a route down to ~100 evenly spaced nodes: enough for distance,
+     ascent and a midpoint, coarse enough to shrug off GPS jitter, and one
+     elevation request rather than two */
+  var NODES = 100;
+
   function thin(pts, want){
     var cum=[0], total=0;
     for(var i=1;i<pts.length;i++){ total+=dist(pts[i-1],pts[i]); cum.push(total); }
@@ -277,21 +415,36 @@
     return {nodes:out, total:total};
   }
 
+  /* Open-Meteo takes at most 100 coordinates per call and rate-limits parallel
+     ones, so batches go up in turn. NODES is set to one batch for that reason. */
+  var ELE_BATCH = 100;
+
   function elevations(nodes){
     if(nodes.every(function(p){ return p.ele != null; })) return Promise.resolve(nodes);
-    var la=nodes.map(function(p){ return p.lat.toFixed(5); }).join(',');
-    var lo=nodes.map(function(p){ return p.lon.toFixed(5); }).join(',');
-    return fetch('https://api.open-meteo.com/v1/elevation?latitude='+la+'&longitude='+lo)
-      .then(function(r){ return r.json(); })
-      .then(function(d){ (d.elevation||[]).forEach(function(e,i){ if(nodes[i]) nodes[i].ele=e; }); return nodes; })
+    var chain = Promise.resolve();
+    for(var s=0;s<nodes.length;s+=ELE_BATCH){
+      chain = chain.then(next(nodes.slice(s, s+ELE_BATCH), s));
+    }
+    return chain
+      .then(function(){ return nodes; })
       .catch(function(){ nodes.forEach(function(p){ if(p.ele==null) p.ele=0; }); return nodes; });
+
+    function next(part, at){ return function(){ return batch(part, at); }; }
+
+    function batch(part, at){
+      var la=part.map(function(p){ return p.lat.toFixed(5); }).join(',');
+      var lo=part.map(function(p){ return p.lon.toFixed(5); }).join(',');
+      return fetch('https://api.open-meteo.com/v1/elevation?latitude='+la+'&longitude='+lo)
+        .then(function(r){ if(!r.ok) throw 0; return r.json(); })
+        .then(function(d){ (d.elevation||[]).forEach(function(e,i){ if(nodes[at+i]) nodes[at+i].ele=e; }); });
+    }
   }
 
   function runRoute(name, raw){
     el.routeOpts.hidden = false;
     if(!el.startAt.value) defaultStart();
     say('Measuring the route\u2026');
-    var t = thin(raw, 120);
+    var t = thin(raw, NODES);
     if(t.total < 100){ say('That route is shorter than 100 m.'); return; }
 
     elevations(t.nodes).then(function(nodes){
