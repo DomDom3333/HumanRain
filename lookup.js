@@ -484,7 +484,10 @@
       ' \u2014 '+mm.toFixed(1)+' mm in that hour.';
     el.outSub.textContent=fc.label+' \u00b7 wind '+Math.round(fc.w[i])+' km/h \u00b7 applied to the numbers above.';
     window.WetMetre.setRain(mm, 1);
-    scrollTo({top:0, behavior:'smooth'});
+    // The jump to the top exists so the answer is on screen. On the wide layout
+    // it already is, and scrolling away from the chart you just tapped is rude.
+    var seen = document.querySelector('.readout').getBoundingClientRect();
+    if(seen.top < 0 || seen.bottom > innerHeight) scrollTo({top:0, behavior:'smooth'});
   });
 
   /* ================= routes ================= */
