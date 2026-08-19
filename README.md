@@ -6,10 +6,10 @@
 out how much water will actually land on **you** — and shows it as glasses,
 bottles or buckets.
 
-Search a town for the next rain window, or load a walking route (GPX from
-bergfex, Komoot, AllTrails, or a trail by name) to get the weather you'll
-actually walk into, hour by hour. A week of forecast is on offer, a day at a
-time, so tomorrow's walk can be planned today.
+Search a town to see what stepping out right now would cost, or load a walking
+route (GPX from bergfex, Komoot, AllTrails, or a trail by name) to get the
+weather you'll actually walk into, hour by hour. A week of forecast is on offer,
+a day at a time, so tomorrow's walk can be planned today.
 
 The search box takes anything OpenStreetMap has a name for — a town, a
 waymarked trail, a gorge, a ridge, a peak. Whatever is a line on the map is
@@ -17,8 +17,12 @@ walked as a route; everything else gets the forecast where it stands. The
 crosshair beside it takes where you are standing now, which is usually the
 question on a phone.
 
-Time outside runs from a minute to a twelve hour day. Staying out past the
-end of the shower doesn't count against you — only the overlap does.
+Time outside runs from a minute to a seven hour day, and it reads *forward*
+from the hour you picked — the default being now. Three hours out is the rain
+of the next three hours as the forecast has it, not one figure stretched flat,
+so a dry start followed by a downpour costs what it costs. The bars it counts
+are shaded on the chart. Setting the rain by hand takes over from the forecast
+until another hour is tapped.
 
 Three files, no build step, no dependencies, no API key.
 
