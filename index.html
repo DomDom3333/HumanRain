@@ -221,6 +221,8 @@
   .hbar i{display:block;background:var(--line);border-radius:1px 1px 0 0;min-height:2px}
   .hbar[data-wet=y] i{background:var(--wet)}
   .hbar[aria-pressed=true] i{background:var(--soaked)}
+  /* the hour you start from, so the counted span reads as a span with a start */
+  .hbar[data-sel=y] i{outline:1px solid var(--pale);outline-offset:1px}
   .hbar:focus-visible{outline:2px solid var(--wet);outline-offset:1px}
   .hticks{
     display:flex;justify-content:space-between;margin-top:6px;
@@ -483,7 +485,7 @@
       <div class="days" id="days" role="group" aria-label="Forecast day"></div>
       <div class="hours" id="hours" role="group" aria-label="Rain by hour"></div>
       <div class="hticks" id="hticks"></div>
-      <p class="hint">Pick a day, then tap any hour to see what one hour outside in it would do.</p>
+      <p class="hint">Pick a day, then tap the hour you'd set off — the shaded bars are the ones counted, and how many there are is the time-outside slider below.</p>
     </div>
     <div class="legs" id="legs" hidden></div>
   </section>
@@ -742,31 +744,82 @@
     document.getElementById('pctFront').textContent = (100-ph)+'%';
   }
 
-  function render(){
-    var mm = posToMm(+mmEl.value);
-    var hrs = +hrsEl.value / 2;              // slider is half-hour steps
-    var mins = posToMins(+minsEl.value);
-    var rate = mm / hrs;                     // mm per hour
+  /* A loaded forecast, and the hour the walk starts from. While one is set the
+     rainfall isn't a single figure any more: it's however much falls between
+     the chosen hour and the end of the time-outside slider. */
+  var series = null;
 
-    /* Standing out in it longer than it rains doesn't get you any wetter: the
-       shower ends whether or not you go in. Only the overlap counts. */
-    var wet = Math.min(mins, hrs*60);
-    var v = compute(rate, wet*60, pace, cover);
+  /* Millimetres landing between `from` and `from + mins`, hour by hour, with
+     part-hours counted pro rata. `covered` is how much of that window the
+     forecast actually reaches — past its end the sky is unknown, not dry. */
+  function accumulate(s, mins){
+    var t = s.t, p = s.p, a = s.startTs, b = a + mins*60, mm = 0, last = a;
+    for(var i=0;i<t.length;i++){
+      var h0 = t[i], h1 = h0 + 3600;
+      var lap = Math.min(b, h1) - Math.max(a, h0);
+      if(lap <= 0) continue;
+      mm += (p[i]||0) * (lap/3600);
+      if(h1 > last) last = Math.min(b, h1);
+    }
+    return {mm:mm, covered:Math.max(0, last - a)/60};
+  }
+
+  function render(){
+    var mins = posToMins(+minsEl.value);
+    var mm, hrs, rate, hint = '';
+
+    if(series){
+      /* Both terms are linear in rate x time, so the varying forecast collapses
+         to its own total: the average rate over the window, for the whole of it. */
+      var acc = accumulate(series, mins);
+      mm = acc.mm;
+      hrs = mins/60;
+      rate = mm/hrs;
+      // Keep the by-hand panel showing what the forecast came to, so opening it
+      // mid-walk carries on from here rather than from a stale number.
+      mmEl.value = mmToPos(mm);
+      hrsEl.value = Math.max(1, Math.min(48, Math.round(hrs*2)));
+      hint = series.onChange
+        ? series.onChange({mm:mm, mins:mins, startTs:series.startTs,
+                           endTs:series.startTs + mins*60,
+                           shortBy:Math.max(0, mins - acc.covered)})
+        : '';
+    }else{
+      mm = posToMm(+mmEl.value);
+      hrs = +hrsEl.value / 2;                // slider is half-hour steps
+      rate = mm / hrs;                       // mm per hour
+      /* Standing out in it longer than it rains doesn't get you any wetter: the
+         shower ends whether or not you go in. Only the overlap counts. */
+      var wet = Math.min(mins, hrs*60);
+      hint = wet < mins
+        ? 'The rain runs out first \u2014 only '+spell(wet).replace(/<[^>]+>/g,'')+
+          ' of that is spent getting wet.'
+        : '';
+      mins = wet;
+    }
+
+    var v = compute(rate, mins*60, pace, cover);
     paint(v.top, v.front);
 
-    document.getElementById('mmVal').textContent = mm;
+    document.getElementById('mmVal').textContent = mm < 10 ? Math.round(mm*10)/10 : Math.round(mm);
     document.getElementById('mmHint').textContent = rainWord(rate);
     document.getElementById('hrsVal').textContent = hrs % 1 ? hrs.toFixed(1) : hrs;
-    document.getElementById('minsVal').innerHTML = spell(mins);
-    document.getElementById('minsHint').textContent = wet < mins
-      ? 'The rain runs out first \u2014 only '+spell(wet).replace(/<[^>]+>/g,'')+
-        ' of that is spent getting wet.'
-      : '';
+    document.getElementById('minsVal').innerHTML = spell(posToMins(+minsEl.value));
+    document.getElementById('minsHint').textContent = hint;
 
     setRainDensity(rate);
   }
 
-  [mmEl,hrsEl,minsEl].forEach(function(el){ el.addEventListener('input', render); });
+  minsEl.addEventListener('input', render);
+  // Setting the rain by hand is a decision: it takes the forecast's place until
+  // another hour is picked, and says so where the forecast used to speak.
+  [mmEl,hrsEl].forEach(function(el){
+    el.addEventListener('input', function(){
+      if(series && series.onDetach) series.onDetach();
+      series = null;
+      render();
+    });
+  });
 
   function group(id, cb){
     var g = document.getElementById(id);
@@ -834,10 +887,19 @@
     paint: paint,
     cover: function(){ return cover; },
     setRain: function(mm, hrs){
+      series = null;
       mmEl.value  = mmToPos(mm);
       hrsEl.value = Math.max(1, Math.min(48, Math.round(hrs*2)));
       render();
     },
+    /* Hand over an hourly forecast and the moment to start from. From then on
+       the time-outside slider reads ahead through it instead of stretching one
+       figure. `onChange` is called on every redraw and returns the hint line. */
+    setForecast: function(o){
+      series = {t:o.t, p:o.p, startTs:o.startTs, onChange:o.onChange, onDetach:o.onDetach};
+      render();
+    },
+    clearForecast: function(){ series = null; },
     // Routes paint their own totals, so the sky is set from the rate they meet.
     setRainRate: setRainDensity,
     V_FALL: V_FALL

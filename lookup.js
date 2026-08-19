@@ -16,7 +16,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 /* HumanRain — one search box for places, trails and GPX files.
-   Places get the next rain window. Routes get an average pace from Naismith's
+   Places start at the current hour and read ahead through the forecast for as
+   long as you say you'll be out. Routes get an average pace from Naismith's
    rule and an hour-by-hour walk through the forecast at the route's midpoint. */
 (function(){
   'use strict';
@@ -416,30 +417,84 @@
     // One scale across every day, so a drizzle Tuesday can't look like a storm.
     fc.cap=Math.min(12, Math.max(2, peak));
 
-    say(why); el.out.hidden=false; el.placeView.hidden=false; el.legs.hidden=true;
-
-    var start=-1,end=-1;
+    /* The next shower is worth a word, but it isn't where the answer starts:
+       the question on opening a place is what stepping out right now costs. */
+    var start=-1;
     for(var j=i0;j<t.length;j++){ if(p[j]>=0.1){ start=j; break; } }
-    if(start>-1){ end=start; while(end+1<t.length && p[end+1]>=0.1) end++; }
-
+    var note;
     if(start===-1){
-      el.outHead.textContent='No rain forecast in '+label+
+      note='No rain forecast in '+label+
         (days.length>=7 ? ' all week.' : ' for the next '+days.length+' days.');
-      el.outSub.textContent='Nothing to model \u2014 pick a day and tap an hour, or move the sliders by hand.';
-      window.WetMetre.setRain(0, 1);         // nothing falling, and the sky above clears with it
+    }else if(start===i0){
+      note='Raining in '+label+' right now.';
     }else{
-      var total=0; for(var k=start;k<=end;k++) total+=p[k];
-      var hrs=end-start+1, when=dayOf(t[start],off), name=dayName(when,fc.today);
-      fc.day=index[when];                    // open on the day the rain is actually on
+      var when=dayOf(t[start],off), name=dayName(when,fc.today);
       // "tomorrow" is a word mid-sentence; "Fri 21" keeps its capital.
       var lead = when===fc.today ? '' : (name==='Tomorrow' ? 'tomorrow ' : name+' ');
-      el.outHead.textContent=(start===i0 ? 'Raining now'
-          : 'Rain '+lead+'from '+hhmm(t[start],off))+
-        ' \u2014 '+total.toFixed(1)+' mm over '+hrs+' hour'+(hrs>1?'s':'')+'.';
-      el.outSub.textContent=label+' \u00b7 wind '+Math.round(w[start])+' km/h \u00b7 applied to the numbers above.';
-      window.WetMetre.setRain(total, hrs);
+      note='Next rain in '+label+' '+lead+'from '+hhmm(t[start],off)+'.';
     }
-    drawDays(); drawHours();
+    say([why, note].filter(Boolean).join(' '));
+
+    el.out.hidden=false; el.placeView.hidden=false; el.legs.hidden=true;
+    fc.day=0;                                // today, because now is on it
+    selectHour(i0);                          // and now is the hour
+    drawDays();
+  }
+
+  /* Start the count from `i`: the current minute if that hour is already under
+     way, the top of the hour otherwise. Everything downstream reads ahead from
+     here for as long as the time-outside slider says. */
+  function selectHour(i){
+    fc.sel=i;
+    fc.startTs=Math.max(Math.floor(Date.now()/1000), fc.t[i]);
+    window.WetMetre.setForecast({t:fc.t, p:fc.p, startTs:fc.startTs,
+                                 onChange:describe, onDetach:detach});
+  }
+
+  /* The by-hand sliders have taken the forecast's place. Say so, and stop the
+     chart claiming a span it no longer drives. */
+  function detach(){
+    if(!fc) return;
+    fc.win=null;
+    el.outHead.textContent='Rainfall set by hand';
+    el.outSub.textContent=fc.label+' \u00b7 tap an hour to go back to the forecast.';
+    drawHours();
+  }
+
+  function spellMins(m){
+    if(m < 90) return m+' minutes';
+    var h=Math.floor(m/60), r=m%60;
+    return h+' hour'+(h>1?'s':'')+(r ? ' '+r+' min' : '');
+  }
+
+  /* Called on every redraw of the readout, with what the window came to.
+     Returns the line that sits under the time-outside slider. */
+  function describe(win){
+    if(!fc) return '';
+    fc.win=win;
+    var i=fc.sel, key=dayOf(fc.startTs,fc.off);
+    var from=(key===fc.today ? '' : dayName(key,fc.today)+', ')+hhmm(fc.startTs,fc.off);
+    var span=spellMins(win.mins);
+
+    el.outHead.textContent = (i===fc.i0 ? 'Leaving now' : 'Leaving '+from)+' \u2014 '+
+      (win.mm>=0.05
+        ? win.mm.toFixed(1)+' mm falls on you over the next '+span+'.'
+        : 'nothing falls in the next '+span+'.');
+    el.outSub.textContent = fc.label+' \u00b7 wind '+Math.round(fc.w[i])+' km/h \u00b7 applied to the numbers above.';
+
+    drawHours();
+
+    // A twelve hour day out lands on tomorrow more often than not; "to 00:30"
+    // on its own reads as a time that has already been and gone.
+    var endKey=dayOf(win.endTs,fc.off);
+    var endName=dayName(endKey,fc.today);
+    // "tomorrow" is a word mid-sentence; "Fri 21" keeps its capital.
+    var to=hhmm(win.endTs,fc.off)+(endKey===key ? '' :
+      ' '+(endName==='Tomorrow' ? 'tomorrow' : endName==='Today' ? 'today' : 'on '+endName));
+    var hint='Adding up the forecast from '+hhmm(fc.startTs,fc.off)+' to '+to+'.';
+    if(win.shortBy>1) hint+=' The last '+spellMins(Math.round(win.shortBy))+
+      ' run past the end of the forecast and count as dry.';
+    return hint;
   }
 
   function drawDays(){
@@ -453,10 +508,14 @@
 
   function drawHours(){
     var d=fc.days[fc.day], html='';
+    // The span the readout is actually counting, so the chart and the number agree.
+    var a=fc.startTs, b=fc.win ? a+fc.win.mins*60 : a;
     for(var i=d.from;i<=d.to;i++){
       var mm=fc.p[i]||0;
       var pct=Math.max(3, Math.min(100, mm/fc.cap*100));
-      html+='<button class="hbar" data-i="'+i+'" data-wet="'+(mm>=0.1?'y':'n')+'" aria-pressed="false" '+
+      var inWin=!!fc.win && fc.t[i]+3600>a && fc.t[i]<b;
+      html+='<button class="hbar" data-i="'+i+'" data-wet="'+(mm>=0.1?'y':'n')+'" '+
+            'aria-pressed="'+(inWin?'true':'false')+'" data-sel="'+(i===fc.sel?'y':'n')+'" '+
             'title="'+hhmm(fc.t[i],fc.off)+' \u2014 '+mm.toFixed(1)+' mm"><i style="height:'+pct+'%"></i></button>';
     }
     el.hours.innerHTML=html;
@@ -473,17 +532,15 @@
   el.days.addEventListener('click', function(e){
     var b=e.target.closest('.day'); if(!b||!fc) return;
     fc.day=+b.dataset.d;
-    drawDays(); drawHours();
+    drawDays();
+    // A day opens at its first hour — today's is now — so there is always
+    // an answer on screen rather than a strip waiting to be tapped.
+    selectHour(fc.days[fc.day].from);
   });
 
   el.hours.addEventListener('click', function(e){
     var b=e.target.closest('.hbar'); if(!b||!fc) return;
-    [].forEach.call(el.hours.querySelectorAll('.hbar'), function(x){ x.setAttribute('aria-pressed', x===b); });
-    var i=+b.dataset.i, mm=fc.p[i]||0, key=dayOf(fc.t[i],fc.off);
-    el.outHead.textContent=(key===fc.today ? '' : dayName(key,fc.today)+', ')+hhmm(fc.t[i],fc.off)+
-      ' \u2014 '+mm.toFixed(1)+' mm in that hour.';
-    el.outSub.textContent=fc.label+' \u00b7 wind '+Math.round(fc.w[i])+' km/h \u00b7 applied to the numbers above.';
-    window.WetMetre.setRain(mm, 1);
+    selectHour(+b.dataset.i);      // which repaints the strip and the readout
     // The jump to the top exists so the answer is on screen. On the wide layout
     // it already is, and scrolling away from the chart you just tapped is rude.
     var seen = document.querySelector('.readout').getBoundingClientRect();
@@ -705,6 +762,8 @@
     gap=last.total-covered;
 
     W.paint(vTop, vFront);
+    W.clearForecast();   // the walk carries its own clock; the slider isn't reading this
+    fc = null;
     W.setRainRate(walked ? mmh/(walked/3600) : 0);   // the sky shows the walk's own rain
     el.out.hidden=false; el.placeView.hidden=true; el.legs.hidden=false;
 
@@ -769,8 +828,9 @@
     return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
   }
   function defaultStart(){
-    var d=new Date(Date.now()+3600000); d.setMinutes(0,0,0);
-    el.startAt.value=stamp(d);
+    // Setting off now is the common case and the honest default; the picker is
+    // there for the walk you're planning, not the one you're on.
+    el.startAt.value=stamp(new Date());
     // The picker stops where the forecast does, rather than at a silent zero.
     var min=new Date(); min.setMinutes(0,0,0);
     el.startAt.min=stamp(min);
