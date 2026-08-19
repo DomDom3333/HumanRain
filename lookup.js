@@ -24,11 +24,31 @@
   var R = 6371000;
   var BASE_KMH = 5;      // Naismith: 5 km/h on the flat
   var ASCENT_MPH = 600;  // plus an hour per 600 m of ascent
+  var DAYS = 7;          // how far ahead Open-Meteo is asked to look
   var el = {};
-  ['q','suggest','gpx','status','out','outHead','outSub','placeView','hours','hticks',
-   'legs','routeOpts','startAt','fitness'].forEach(function(k){ el[k] = document.getElementById(k); });
+  ['q','suggest','gpx','geo','status','retry','out','outHead','outSub','placeView','days','hours',
+   'hticks','legs','routeOpts','startAt','fitness'].forEach(function(k){ el[k] = document.getElementById(k); });
 
-  function say(m){ el.status.textContent = m || ''; }
+  var again = null;
+  function say(m, working){
+    el.status.textContent = m || '';
+    el.status.classList.toggle('working', !!working && !!m);
+    again = null; el.retry.hidden = true;          // any new word clears the old offer
+  }
+
+  /* Both of these services rate-limit, and a refused call is usually fine a moment
+     later — so a dead end offers the retry rather than describing one. */
+  function offer(fn, label){
+    again = fn;
+    el.retry.textContent = label || 'Try again';
+    el.retry.hidden = false;
+  }
+  function fail(m, retry){ say(m); if(retry) offer(retry); }
+
+  el.retry.addEventListener('click', function(){
+    var go = again;
+    if(go){ el.retry.hidden = true; go(); }
+  });
   function fit(){ return parseFloat(el.fitness.querySelector('[aria-pressed=true]').dataset.v); }
 
   function dist(a,b){
@@ -42,6 +62,17 @@
     return (h<10?'0':'')+h+':'+(m<10?'0':'')+m;
   }
   function pad(n){ return (n<10?'0':'')+n; }
+
+  /* Days are counted where the rain falls, not where the phone is: "tomorrow"
+     on a forecast is the forecast's tomorrow. */
+  function dayOf(unix, off){ return Math.floor((unix+(off||0))/86400); }
+  var WEEK = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  function dayName(key, today){
+    if(key === today) return 'Today';
+    if(key === today+1) return 'Tomorrow';
+    var d = new Date(key*86400000);
+    return WEEK[d.getUTCDay()]+' '+d.getUTCDate();
+  }
 
   /* ================= autocomplete ================= */
 
@@ -145,16 +176,34 @@
 
   function rx(s){ return s.replace(/["\\]/g,'').replace(/[\^$.*+?()[\]{}|]/g, '\\$&'); }
 
+  /* A request that never answers is worse than one that fails: the page just sits
+     there. Everything here is given a deadline. */
+  var JSON_MS = 20000;
   function json(url){
-    return fetch(url).then(function(r){ if(!r.ok) throw 0; return r.json(); });
+    var ctl = new AbortController();
+    var bell = setTimeout(function(){ ctl.abort(); }, JSON_MS);
+    return fetch(url, {signal:ctl.signal})
+      .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+      .then(function(d){ clearTimeout(bell); return d; },
+            function(e){ clearTimeout(bell); throw e; });
   }
   function fill(b, my, list){
     if(my !== seq) return;               // a newer keystroke has already taken over
     bucket[b] = list; merge();
   }
 
+  /* The trail sweep is the slow one. A newer keystroke, or picking something,
+     makes its answer worthless — so it is called off rather than left to hold a
+     mirror that the picked trail is about to need. */
+  var trailCtl = null, trailGen = 0;
+  function dropTrailSearch(){
+    trailGen++;                    // also disowns the worldwide retry, which has no request yet
+    if(trailCtl){ trailCtl.abort(); trailCtl = null; }
+  }
+
   function suggest(v){
     var my = ++seq;
+    dropTrailSearch();
     bucket = {towns:[], osm:[], trails:[]};
 
     var towns = json('https://geocoding-api.open-meteo.com/v1/search?count=5&language=en&format=json&name='+
@@ -183,9 +232,9 @@
      geocoders just found \u2014 that box is where the walk almost always is. Only if
      it comes back empty is the whole world worth the wait. */
   function findTrails(v, my){
-    var near = bucket.osm[0] || bucket.towns[0];
+    var near = bucket.osm[0] || bucket.towns[0], gen = trailGen;
     trailsNear(v, my, near).then(function(found){
-      if(!found && near) trailsNear(v, my, null);
+      if(!found && near && gen === trailGen && my === seq) trailsNear(v, my, null);
     });
   }
 
@@ -194,8 +243,9 @@
       ? '('+(near.lat-pad).toFixed(3)+','+(near.lon-pad).toFixed(3)+','+
             (near.lat+pad).toFixed(3)+','+(near.lon+pad).toFixed(3)+')'
       : '';
+    trailCtl = new AbortController();
     return overpass('[out:json][timeout:'+(box?25:45)+'];relation["route"~"hiking|foot|walking"]'+
-                    '["name"~"'+rx(v)+'",i]'+box+';out center tags 6;')
+                    '["name"~"'+rx(v)+'",i]'+box+';out center tags 6;', trailCtl.signal)
       .then(function(d){
         var found = (d.elements||[]).filter(function(e){ return e.tags && e.tags.name; });
         fill('trails', my, found.map(fromRelation));
@@ -231,25 +281,98 @@
     if(!it) return;
     el.q.value = it.label;
     closeList();
+    dropTrailSearch();
     if(it.osm) loadOsm(it);
     else loadPlace(it.lat, it.lon, it.label);
   }
 
-  /* Overpass mirrors go down and rate-limit independently, so try them in turn. */
+  /* Overpass mirrors go down, rate-limit and stall independently, and a stalled
+     mirror answers no sooner than a dead one — waiting each one out in turn is
+     what makes a picked trail look like it did nothing at all. So a mirror gets a
+     few seconds to itself, then the next one races it, and the first answer wins;
+     the losers are aborted so the volunteers aren't left doing unwanted work.
+     Whichever answered is tried first next time. */
   var MIRRORS = ['https://overpass-api.de/api/interpreter',
                  'https://overpass.private.coffee/api/interpreter',
                  'https://overpass.kumi.systems/api/interpreter'];
+  var mirror = 0;            // the one that answered last
+  var HEDGE_MS = 5000;       // how long a mirror gets before the next one joins in
+  var PATIENCE_MS = 22000;   // and how long the lot of them get in total
 
-  function overpass(query, n){
-    n = n || 0;
-    return fetch(MIRRORS[n], {
-      method:'POST', body:'data='+encodeURIComponent(query),
-      headers:{'Content-Type':'application/x-www-form-urlencoded'}
-    }).then(function(r){ if(!r.ok) throw 0; return r.json(); })
-      .catch(function(e){
-        if(n+1 < MIRRORS.length) return overpass(query, n+1);
-        throw e;
-      });
+  function overpass(query, signal){
+    return new Promise(function(resolve, reject){
+      var open=[], started=0, failed=0, done=false, hedge=null;
+      var patience = setTimeout(function(){ stop(new Error('Overpass timed out')); }, PATIENCE_MS);
+
+      function settle(fn, v){
+        if(done) return;
+        done = true;
+        clearTimeout(hedge); clearTimeout(patience);
+        open.forEach(function(c){ c.abort(); });
+        if(signal) signal.removeEventListener('abort', cancel);
+        fn(v);
+      }
+      function stop(e){ settle(reject, e); }
+      function cancel(){ stop(new Error('cancelled')); }
+      if(signal){
+        if(signal.aborted){ cancel(); return; }
+        signal.addEventListener('abort', cancel);
+      }
+
+      function launch(){
+        clearTimeout(hedge);
+        if(done || started >= MIRRORS.length) return;
+        var n = (mirror + started) % MIRRORS.length, ctl = new AbortController();
+        started++; open.push(ctl);
+        fetch(MIRRORS[n], {
+          method:'POST', signal:ctl.signal, body:'data='+encodeURIComponent(query),
+          headers:{'Content-Type':'application/x-www-form-urlencoded'}
+        }).then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+          .then(function(d){ mirror = n; settle(resolve, d); }, function(e){
+            if(ctl.signal.aborted) return;          // called off on purpose, not a failure
+            if(++failed >= MIRRORS.length) stop(e);
+            else launch();
+          });
+        if(started < MIRRORS.length) hedge = setTimeout(launch, HEDGE_MS);
+      }
+      launch();
+    });
+  }
+
+  /* ================= where you are ================= */
+
+  /* "Am I about to get wet" is a question asked outdoors, so the phone already
+     knows the answer to "where". The button appears wherever the API does rather
+     than on a guess about the device; it needs https, which is where this lives. */
+  function locate(){
+    el.geo.disabled = true;
+    say('Finding where you are\u2026', 1);
+    navigator.geolocation.getCurrentPosition(function(pos){
+      el.geo.disabled = false;
+      var la = pos.coords.latitude, lo = pos.coords.longitude;
+      var coords = la.toFixed(3)+', '+lo.toFixed(3);
+      // A place name reads better than coordinates, but never at the cost of the
+      // forecast — if the reverse lookup fails the numbers do fine.
+      json('https://photon.komoot.io/reverse?limit=1&lang=en&lat='+la.toFixed(5)+'&lon='+lo.toFixed(5))
+        .then(function(d){
+          var pr = ((d.features||[])[0]||{}).properties || {};
+          return pr.city || pr.name || coords;
+        }, function(){ return coords; })
+        .then(function(label){
+          el.q.value = label;
+          closeList(); dropTrailSearch();
+          loadPlace(la, lo, label);
+        });
+    }, function(err){
+      el.geo.disabled = false;
+      // A refusal is a decision, not a glitch: don't offer to ask again.
+      if(err && err.code === 1) say('Location permission was refused \u2014 search for the place instead.');
+      else fail('Couldn\u2019t get a fix on where you are \u2014 search for the place instead.', locate);
+    }, {enableHighAccuracy:false, timeout:15000, maximumAge:300000});
+  }
+  if(navigator.geolocation){
+    el.geo.hidden = false;
+    el.geo.addEventListener('click', locate);
   }
 
   /* ================= place mode ================= */
@@ -258,63 +381,113 @@
 
   /* `why` explains a fall back from a route to its location, and is left on
      screen once the forecast lands. */
-  function loadPlace(lat, lon, label, why){
+  function loadPlace(lat, lon, label, why, retry){
     el.routeOpts.hidden = true;
-    say('Fetching the forecast for '+label+'\u2026');
-    json('https://api.open-meteo.com/v1/forecast?timeformat=unixtime&timezone=auto&forecast_days=3'+
+    say('Fetching the forecast for '+label+'\u2026', 1);
+    json('https://api.open-meteo.com/v1/forecast?timeformat=unixtime&timezone=auto&forecast_days='+DAYS+
          '&hourly=precipitation,wind_speed_10m&latitude='+lat.toFixed(4)+'&longitude='+lon.toFixed(4))
-      .then(function(d){ showPlace(d, label, why); }, function(){
-        say('Couldn\u2019t reach the forecast service. The sliders below still work.');
+      .then(function(d){
+        showPlace(d, label, why);
+        if(retry) offer(retry.fn, retry.label);    // after showPlace has had its say
+      }, function(){
+        fail('Couldn\u2019t reach the forecast service. The sliders below still work.',
+             function(){ loadPlace(lat, lon, label, why, retry); });
       });
   }
 
   function showPlace(d, label, why){
     var t=d.hourly.time, p=d.hourly.precipitation, w=d.hourly.wind_speed_10m;
+    var off=d.utc_offset_seconds||0;
     var now=Date.now()/1000, i0=0;
     while(i0<t.length-1 && t[i0+1]<=now) i0++;
-    fc = {t:t,p:p,w:w,off:d.utc_offset_seconds||0,i0:i0,label:label};
+    fc = {t:t,p:p,w:w,off:off,i0:i0,label:label};
+
+    /* The forecast is cut into local days from this hour on, so tomorrow and the
+       days after it are a tap away instead of off the end of the strip. */
+    var days=[], index={}, peak=0;
+    for(var i=i0;i<t.length;i++){
+      var key=dayOf(t[i],off);
+      if(index[key]===undefined){ index[key]=days.length; days.push({key:key,from:i,to:i,mm:0}); }
+      var day=days[index[key]];
+      day.to=i; day.mm+=p[i]||0;
+      if((p[i]||0)>peak) peak=p[i]||0;
+    }
+    fc.days=days; fc.today=days.length?days[0].key:0; fc.day=0;
+    // One scale across every day, so a drizzle Tuesday can't look like a storm.
+    fc.cap=Math.min(12, Math.max(2, peak));
 
     say(why); el.out.hidden=false; el.placeView.hidden=false; el.legs.hidden=true;
 
     var start=-1,end=-1;
-    for(var i=i0;i<Math.min(t.length,i0+48);i++){ if(p[i]>=0.1){ start=i; break; } }
+    for(var j=i0;j<t.length;j++){ if(p[j]>=0.1){ start=j; break; } }
     if(start>-1){ end=start; while(end+1<t.length && p[end+1]>=0.1) end++; }
 
     if(start===-1){
-      el.outHead.textContent='No rain forecast in '+label+' for the next two days.';
-      el.outSub.textContent='Nothing to model \u2014 tap an hour below, or move the sliders by hand.';
+      el.outHead.textContent='No rain forecast in '+label+
+        (days.length>=7 ? ' all week.' : ' for the next '+days.length+' days.');
+      el.outSub.textContent='Nothing to model \u2014 pick a day and tap an hour, or move the sliders by hand.';
+      window.WetMetre.setRain(0, 1);         // nothing falling, and the sky above clears with it
     }else{
-      var total=0; for(var j=start;j<=end;j++) total+=p[j];
-      var hrs=end-start+1;
-      el.outHead.textContent=(start===i0?'Raining now':'Rain from '+hhmm(t[start],fc.off))+
+      var total=0; for(var k=start;k<=end;k++) total+=p[k];
+      var hrs=end-start+1, when=dayOf(t[start],off), name=dayName(when,fc.today);
+      fc.day=index[when];                    // open on the day the rain is actually on
+      // "tomorrow" is a word mid-sentence; "Fri 21" keeps its capital.
+      var lead = when===fc.today ? '' : (name==='Tomorrow' ? 'tomorrow ' : name+' ');
+      el.outHead.textContent=(start===i0 ? 'Raining now'
+          : 'Rain '+lead+'from '+hhmm(t[start],off))+
         ' \u2014 '+total.toFixed(1)+' mm over '+hrs+' hour'+(hrs>1?'s':'')+'.';
       el.outSub.textContent=label+' \u00b7 wind '+Math.round(w[start])+' km/h \u00b7 applied to the numbers above.';
       window.WetMetre.setRain(total, hrs);
     }
-    drawHours();
+    drawDays(); drawHours();
+  }
+
+  function drawDays(){
+    el.days.innerHTML = fc.days.map(function(d,i){
+      return '<button class="day" data-d="'+i+'" aria-pressed="'+(i===fc.day)+'">'+
+             '<b>'+esc(dayName(d.key, fc.today))+'</b>'+
+             '<span class="day-mm'+(d.mm>=0.1?' wet':'')+'">'+
+             (d.mm>=0.1 ? d.mm.toFixed(1)+' mm' : 'dry')+'</span></button>';
+    }).join('');
   }
 
   function drawHours(){
-    var html='', cap=4;
-    for(var k=0;k<24;k++){
-      var i=fc.i0+k, mm=fc.p[i]||0;
-      var pct=Math.max(3, Math.min(100, mm/cap*100));
+    var d=fc.days[fc.day], html='';
+    for(var i=d.from;i<=d.to;i++){
+      var mm=fc.p[i]||0;
+      var pct=Math.max(3, Math.min(100, mm/fc.cap*100));
       html+='<button class="hbar" data-i="'+i+'" data-wet="'+(mm>=0.1?'y':'n')+'" aria-pressed="false" '+
             'title="'+hhmm(fc.t[i],fc.off)+' \u2014 '+mm.toFixed(1)+' mm"><i style="height:'+pct+'%"></i></button>';
     }
     el.hours.innerHTML=html;
-    el.hticks.innerHTML='<span>'+hhmm(fc.t[fc.i0],fc.off)+'</span><span>'+
-      hhmm(fc.t[fc.i0+11],fc.off)+'</span><span>'+hhmm(fc.t[fc.i0+23],fc.off)+'</span>';
+    // Today's strip starts at the current hour, so a late evening leaves too few
+    // bars for three ticks to be three different times.
+    var mid=Math.floor((d.from+d.to)/2), ticks=[d.from, mid, d.to].filter(function(i,n,a){
+      return a.indexOf(i) === n;
+    });
+    el.hticks.innerHTML=ticks.map(function(i){
+      return '<span>'+hhmm(fc.t[i],fc.off)+'</span>';
+    }).join('');
   }
+
+  el.days.addEventListener('click', function(e){
+    var b=e.target.closest('.day'); if(!b||!fc) return;
+    fc.day=+b.dataset.d;
+    drawDays(); drawHours();
+  });
 
   el.hours.addEventListener('click', function(e){
     var b=e.target.closest('.hbar'); if(!b||!fc) return;
     [].forEach.call(el.hours.querySelectorAll('.hbar'), function(x){ x.setAttribute('aria-pressed', x===b); });
-    var i=+b.dataset.i, mm=fc.p[i]||0;
-    el.outHead.textContent=hhmm(fc.t[i],fc.off)+' \u2014 '+mm.toFixed(1)+' mm in that hour.';
+    var i=+b.dataset.i, mm=fc.p[i]||0, key=dayOf(fc.t[i],fc.off);
+    el.outHead.textContent=(key===fc.today ? '' : dayName(key,fc.today)+', ')+hhmm(fc.t[i],fc.off)+
+      ' \u2014 '+mm.toFixed(1)+' mm in that hour.';
     el.outSub.textContent=fc.label+' \u00b7 wind '+Math.round(fc.w[i])+' km/h \u00b7 applied to the numbers above.';
     window.WetMetre.setRain(mm, 1);
-    scrollTo({top:0, behavior:'smooth'});
+    // The jump to the top exists so the answer is on screen. On the wide layout
+    // it already is, and scrolling away from the chart you just tapped is rude.
+    var seen = document.querySelector('.readout').getBoundingClientRect();
+    if(seen.top < 0 || seen.bottom > innerHeight) scrollTo({top:0, behavior:'smooth'});
   });
 
   /* ================= routes ================= */
@@ -374,30 +547,68 @@
     return m;
   }
 
+  var HIKING = '["route"~"hiking|foot|walking"]';
+  var OSM_DOWN = 'OpenStreetMap didn\u2019t answer \u2014 here\u2019s the forecast for the spot. '+
+                 'For the walk itself, try again in a minute or load the GPX.';
+
+  /* A named path in OpenStreetMap is usually one segment of something much
+     longer: search "Rennsteig" and the hit is a few hundred metres of track that
+     happens to carry the name, not the 170 km of it. So when a way belongs to a
+     waymarked route of the same name, that route is what gets walked. */
+  function parentRoute(elements, name){
+    var want = name.toLowerCase(), best = null;
+    (elements||[]).forEach(function(e){
+      var n = e.type === 'relation' && e.tags && e.tags.name;
+      if(!n) return;
+      var l = n.toLowerCase(), rank = l === want ? 2 : (l.indexOf(want) === 0 ? 1 : 0);
+      if(rank && (!best || rank > best.rank)) best = {rank:rank, id:e.id, name:n};
+    });
+    return best;               // a route that merely passes through is not the one
+  }
+
   /* Walk it if it is a line, stand on it if it is not: whatever goes wrong here,
      the forecast for the spot still beats "not found". */
   function loadOsm(it){
     var name = it.label;
     function instead(why){
-      if(it.lat || it.lon) loadPlace(it.lat, it.lon, name, why);
-      else say(why || 'That one has no geometry in OpenStreetMap.');
+      // Standing on the spot beats nothing, but the walk is still what was asked
+      // for — so when OpenStreetMap is merely busy, the offer stays on screen.
+      var retry = why === OSM_DOWN ? {fn:function(){ loadOsm(it); }, label:'Try the walk again'} : null;
+      if(it.lat || it.lon) loadPlace(it.lat, it.lon, name, why, retry);
+      else fail(why || 'That one has no geometry in OpenStreetMap.', retry && retry.fn);
     }
-    if(it.osm.type === 'N'){ instead(''); return; }
+    function walk(label, line){
+      if(length(line) < 250){
+        instead('No walkable line for that one \u2014 here\u2019s the forecast where it is.');
+        return;
+      }
+      runRoute(label, line);
+    }
+    function geometry(kind, id, label){
+      say('Tracing \u201c'+label+'\u201d\u2026', 1);
+      overpass('[out:json][timeout:60];'+kind+'('+id+');out geom;')
+        .then(function(d){
+          var e=(d.elements||[])[0];
+          walk(label, e ? lineOf(e) : []);
+        }, function(){ instead(OSM_DOWN); });
+    }
 
-    say('Loading \u201c'+name+'\u201d from OpenStreetMap\u2026');
-    overpass('[out:json][timeout:60];'+(it.osm.type==='R'?'relation':'way')+'('+it.osm.id+');out geom;')
+    if(it.osm.type === 'N'){ instead(''); return; }
+    say('Looking \u201c'+name+'\u201d up in OpenStreetMap\u2026', 1);
+
+    if(it.osm.type === 'R'){ geometry('relation', it.osm.id, name); return; }
+
+    // One call asks for the segment itself and the routes it belongs to, so the
+    // common case — a way that is its own walk — costs no extra round trip.
+    overpass('[out:json][timeout:30];way('+it.osm.id+')->.w;.w out geom;'+
+             'rel(bw.w)'+HIKING+';out tags center;')
       .then(function(d){
-        var e=(d.elements||[])[0], line = e ? lineOf(e) : [];
-        if(length(line) < 250){
-          instead('No walkable line for that one \u2014 here\u2019s the forecast where it is.');
-          return;
-        }
-        runRoute(name, line);
-      })
-      .catch(function(){
-        instead('OpenStreetMap didn\u2019t answer \u2014 here\u2019s the forecast for the spot. '+
-                'For the walk itself, try again in a minute or load the GPX.');
-      });
+        var els = d.elements || [], up = parentRoute(els, name);
+        if(up){ geometry('relation', up.id, up.name); return; }
+        var w = null;
+        els.forEach(function(e){ if(e.type === 'way' && !w) w = e; });
+        walk(name, w ? lineOf(w) : []);
+      }, function(){ instead(OSM_DOWN); });
   }
 
   /* thin a route down to 100 evenly spaced nodes: enough for distance, ascent
@@ -432,7 +643,7 @@
   function runRoute(name, raw){
     el.routeOpts.hidden = false;
     if(!el.startAt.value) defaultStart();
-    say('Measuring the route\u2026');
+    say('Measuring the route\u2026', 1);
     var t = thin(raw, NODES);
     if(t.total < 100){ say('That route is shorter than 100 m.'); return; }
 
@@ -445,21 +656,21 @@
       var mid=nodes[Math.floor(nodes.length/2)];
       last = {name:name, total:t.total, gain:gain, mid:mid};
       forecastRoute();
-    });
+    }, function(){ fail('Couldn\u2019t measure that route.', function(){ runRoute(name, raw); }); });
   }
 
   var last = null;
 
   function forecastRoute(){
     if(!last) return;
-    say('Fetching the forecast along the route\u2026');
+    say('Fetching the forecast along the route\u2026', 1);
     // two-armed then: only the fetch is caught here, so a bug in showRoute
     // reaches the console instead of posing as a network failure
-    json('https://api.open-meteo.com/v1/forecast?timeformat=unixtime&timezone=auto&forecast_days=3'+
+    json('https://api.open-meteo.com/v1/forecast?timeformat=unixtime&timezone=auto&forecast_days='+DAYS+
          '&hourly=precipitation,snowfall,wind_speed_10m&latitude='+last.mid.lat.toFixed(4)+
          '&longitude='+last.mid.lon.toFixed(4))
       .then(showRoute, function(){
-        say('Couldn\u2019t reach the forecast service. The route measured fine \u2014 try again.');
+        fail('Couldn\u2019t reach the forecast service. The route measured fine.', forecastRoute);
       });
   }
 
@@ -477,7 +688,7 @@
     var t=d.hourly.time, p=d.hourly.precipitation, s=d.hourly.snowfall,
         w=d.hourly.wind_speed_10m, off=d.utc_offset_seconds||0;
 
-    var vTop=0, vFront=0, snow=0, gap=0, rows=[], cover=W.cover();
+    var vTop=0, vFront=0, snow=0, gap=0, rows=[], cover=W.cover(), mmh=0, walked=0;
     for(var i=0;i<t.length;i++){
       var hs=t[i], he=hs+3600;
       var a=Math.max(t0,hs), b=Math.min(t1,he);
@@ -486,6 +697,7 @@
       var v=W.compute(p[i]||0, dt, speed, cover);
       vTop+=v.top; vFront+=v.front;
       snow=Math.max(snow, s[i]||0);
+      mmh+=(p[i]||0)*dt/3600; walked+=dt;
       rows.push({t:hs, mm:p[i]||0, wind:w[i]||0, l:(v.top+v.front)*1000,
                  d0:(a-t0)*speed, d1:(b-t0)*speed});
     }
@@ -493,6 +705,7 @@
     gap=last.total-covered;
 
     W.paint(vTop, vFront);
+    W.setRainRate(walked ? mmh/(walked/3600) : 0);   // the sky shows the walk's own rain
     el.out.hidden=false; el.placeView.hidden=true; el.legs.hidden=false;
 
     var hh=Math.floor(hours), mm=Math.round((hours-hh)*60);
@@ -502,9 +715,17 @@
 
     var wettest=null;
     rows.forEach(function(r){ if(!wettest||r.l>wettest.l) wettest=r; });
+    // A long day out now runs past midnight more often than not, so the hours
+    // are broken up by the day they fall on.
+    var day0 = dayOf(Math.floor(Date.now()/1000), off), seen = -1;
     el.legs.innerHTML = rows.length ? rows.map(function(r){
       var hot = wettest && r.t===wettest.t && r.l>0.02;
-      return '<div class="leg'+(hot?' leg-hot':'')+'">'+
+      var key = dayOf(r.t, off), head = '';
+      if(key !== seen){
+        seen = key;
+        head = '<div class="leg-day">'+esc(dayName(key, day0))+'</div>';
+      }
+      return head+'<div class="leg'+(hot?' leg-hot':'')+'">'+
              '<span class="leg-t">'+hhmm(r.t,off)+'</span>'+
              '<span class="leg-d">km '+(r.d0/1000).toFixed(1)+'\u2013'+(r.d1/1000).toFixed(1)+'</span>'+
              '<span class="leg-r">'+r.mm.toFixed(1)+' mm/h</span>'+
@@ -513,7 +734,7 @@
 
     var notes=[];
     if(snow>0.1) notes.push('Snow forecast here \u2014 the litres are an upper bound on wetness and mostly a warning about cold.');
-    if(gap>100) notes.push('The forecast reaches three days out; the last '+(gap/1000).toFixed(1)+' km falls beyond it and counts as dry.');
+    if(gap>100) notes.push('The forecast reaches '+DAYS+' days out; the last '+(gap/1000).toFixed(1)+' km falls beyond it and counts as dry.');
     if(wettest && wettest.l>0.02) notes.push('Wettest stretch: km '+(wettest.d0/1000).toFixed(1)+'\u2013'+
       (wettest.d1/1000).toFixed(1)+' from '+hhmm(wettest.t,off)+'.');
     say(notes.join(' '));
@@ -524,7 +745,7 @@
   el.gpx.addEventListener('change', function(e){
     var f=e.target.files && e.target.files[0];
     if(!f) return;
-    say('Reading '+f.name+'\u2026');
+    say('Reading '+f.name+'\u2026', 1);
     var fr=new FileReader();
     fr.onload=function(){
       try{
@@ -544,9 +765,16 @@
   });
   el.startAt.addEventListener('change', function(){ if(last) forecastRoute(); });
 
+  function stamp(d){
+    return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+  }
   function defaultStart(){
     var d=new Date(Date.now()+3600000); d.setMinutes(0,0,0);
-    el.startAt.value=d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':00';
+    el.startAt.value=stamp(d);
+    // The picker stops where the forecast does, rather than at a silent zero.
+    var min=new Date(); min.setMinutes(0,0,0);
+    el.startAt.min=stamp(min);
+    el.startAt.max=stamp(new Date(min.getTime()+(DAYS-1)*86400000));
   }
   defaultStart();
 
