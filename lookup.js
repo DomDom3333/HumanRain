@@ -484,7 +484,7 @@
 
     drawHours();
 
-    // A twelve hour day out lands on tomorrow more often than not; "to 00:30"
+    // A long day out still lands on tomorrow often enough; "to 00:30"
     // on its own reads as a time that has already been and gone.
     var endKey=dayOf(win.endTs,fc.off);
     var endName=dayName(endKey,fc.today);

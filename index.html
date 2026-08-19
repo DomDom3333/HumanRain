@@ -607,19 +607,19 @@
     return mm < 10 ? Math.round(mm*10)/10 : Math.round(mm);
   }
 
-  /* Slider position -> minutes out, from a dash to the postbox up to a twelve
+  /* Slider position -> minutes out, from a dash to the postbox up to a seven
      hour day on the hill. Curved for the same reason the rainfall slider is:
      the difference between 5 and 15 minutes matters, the difference between
-     9 and 9¼ hours does not. Steps coarsen as the numbers grow. */
+     6 and 6¼ hours does not. Steps coarsen as the numbers grow. */
   function posToMins(p){
-    var m = 1 + Math.pow(p/100, 1.8) * 719;
+    var m = 1 + Math.pow(p/100, 1.8) * 419;
     if(m < 20)  return Math.round(m);
     if(m < 120) return Math.round(m/5)*5;
     return Math.round(m/15)*15;
   }
   function two(n){ return (n<10?'0':'')+n; }
   function spell(m){
-    if(m < 90) return m+' <small>minutes</small>';
+    if(m < 90) return m+' <small>minute'+(m===1?'':'s')+'</small>';
     var h = Math.floor(m/60), r = m%60;
     return h+'<small>h</small>'+(r ? ' '+two(r) : '');
   }
@@ -633,6 +633,9 @@
   }
 
   function tone(l){
+    /* Nothing landing on you isn't the mildest degree of wet, it's a different
+       answer \u2014 and the one worth reading off a dry forecast. */
+    if(l < 0.001) return {c:'var(--muted)', t:'Dry', n:'Nothing worth calling rain. Leave the coat.'};
     if(l < 0.12) return {c:'var(--wet)', t:'Barely damp', n:'Spots on your shoulders, dry by the time you\u2019re inside.'};
     if(l < 0.5)  return {c:'var(--wet)', t:'Noticeably wet', n:'Hair damp, shoulders dark. Nothing a shake-off won\u2019t fix.'};
     if(l < 1.5)  return {c:'var(--wet-mid)', t:'Properly soaked', n:'Through to the shirt. You\u2019ll want to hang that coat up.'};
@@ -737,11 +740,13 @@
     box.innerHTML = html;
     box.setAttribute('aria-label', n.toFixed(1)+' '+(n===1?u.one:u.many)+' of water');
 
-    var tot = vTop+vFront, ph = tot>0 ? Math.round(vTop/tot*100) : 0;
+    // With nothing falling there is no split to draw: an empty bar, not a bar
+    // saying all of nothing arrived from the front.
+    var tot = vTop+vFront, ph = tot>0 ? Math.round(vTop/tot*100) : 0, pf = tot>0 ? 100-ph : 0;
     document.getElementById('segHead').style.width = ph+'%';
-    document.getElementById('segFront').style.width = (100-ph)+'%';
+    document.getElementById('segFront').style.width = pf+'%';
     document.getElementById('pctHead').textContent = ph+'%';
-    document.getElementById('pctFront').textContent = (100-ph)+'%';
+    document.getElementById('pctFront').textContent = pf+'%';
   }
 
   /* A loaded forecast, and the hour the walk starts from. While one is set the

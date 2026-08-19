@@ -17,7 +17,7 @@ walked as a route; everything else gets the forecast where it stands. The
 crosshair beside it takes where you are standing now, which is usually the
 question on a phone.
 
-Time outside runs from a minute to a twelve hour day, and it reads *forward*
+Time outside runs from a minute to a seven hour day, and it reads *forward*
 from the hour you picked — the default being now. Three hours out is the rain
 of the next three hours as the forecast has it, not one figure stretched flat,
 so a dry start followed by a downpour costs what it costs. The bars it counts
